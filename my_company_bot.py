@@ -2,6 +2,30 @@ import os
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+import threading
+from flask import Flask
+
+# Создаём мини Flask-сервер для Render
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "OK", 200
+
+@app.route('/health')
+def health():
+    return "Bot is alive", 200
+
+# Функция для запуска Flask в отдельном потоке
+def run_flask():
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
+
+# Запускаем Flask ДО запуска бота
+print("🚀 Запускаем Flask-сервер для здоровья...")
+flask_thread = threading.Thread(target=run_flask)
+flask_thread.daemon = True  # Умирает вместе с основным процессом
+flask_thread.start()
 
 # 🎛️ Настройка логирования
 logging.basicConfig(
