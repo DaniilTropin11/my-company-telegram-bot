@@ -412,6 +412,7 @@ def is_user_registered(user_id: int) -> bool:
 def save_user_to_sheet(user_id: int, user_data: dict):
     """Сохраняет пользователя в Google Таблицу"""
     if not USERS_SHEET:
+        logger.warning("⚠️ USERS_SHEET не инициализирован — пользователь не сохранён")
         return
     
     try:
