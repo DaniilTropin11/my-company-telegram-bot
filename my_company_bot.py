@@ -67,7 +67,7 @@ def init_google_sheets():
         client = gspread.authorize(credentials)
 
         # Открываем таблицу (замени на свой URL)
-        spreadsheet = client.open_by_url(os.getenv("https://docs.google.com/spreadsheets/d/1wJALCSsKGEWP30xjHrP9u2oyq44WM9zFp_izhETmxJY/edit?usp=sharing", ""))
+        spreadsheet = client.open_by_url(os.getenv("GOOGLE_SHEET_URL", ""))
         
         # Получаем листы
         users_sheet = spreadsheet.worksheet("Пользователи")
