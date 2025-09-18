@@ -244,7 +244,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "*Видео-инструкция:* https://youtu.be/dQw4w9WgXcQ"
         )
         keyboard = [
-            [InlineKeyboardButton("✅ Пройти тест", URL=URL=https://docs.google.com/forms/d/e/1FAIpQLSeMGexbgCqXZQ8yo_T24htXnEWj-gvysVPLcvDjirTgp3_Aaw/viewform?usp=dialog)],
+            [InlineKeyboardButton("✅ Пройти тест", URL=https://docs.google.com/forms/d/e/1FAIpQLSeMGexbgCqXZQ8yo_T24htXnEWj-gvysVPLcvDjirTgp3_Aaw/viewform?usp=dialog)],
             [InlineKeyboardButton("🔙 Назад к материалам", callback_data='menu_training')],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
