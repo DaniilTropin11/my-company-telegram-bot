@@ -5,7 +5,9 @@ from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
+import json
+from datetime import datetime
 
 # ==============================
 # 🔌 FLASK SERVER FOR RENDER HEALTH
@@ -55,36 +57,72 @@ def init_google_sheets():
             "https://spreadsheets.google.com/feeds",
             "https://www.googleapis.com/auth/drive"
         ]
-        # Загружаем JSON-ключ из переменной окружения
+        
         json_key = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
         if not json_key:
             logger.error("❌ GOOGLE_SERVICE_ACCOUNT_JSON не задан!")
             return None, None
-
-        import json
-        credentials_dict = json.loads(json_key)
-        credentials = ServiceAccountCredentials.from_json_keyfile_dict(credentials_dict, scope)
+        
+        try:
+            credentials_dict = json.loads(json_key)
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Ошибка парсинга JSON: {e}")
+            return None, None
+        
+        credentials = Credentials.from_service_account_info(credentials_dict, scopes=scope)
         client = gspread.authorize(credentials)
-
-        # Открываем таблицу (замени на свой URL)
-        spreadsheet = client.open_by_url(os.getenv("GOOGLE_SHEET_URL", ""))
         
-        # Получаем листы
-        users_sheet = spreadsheet.worksheet("Пользователи")
-        tests_sheet = spreadsheet.worksheet("Тесты")
+        sheet_url = os.getenv("GOOGLE_SHEET_URL")
+        if not sheet_url:
+            logger.error("❌ GOOGLE_SHEET_URL не задан!")
+            return None, None
         
-        # Создаём заголовки, если их нет
-        if not users_sheet.get_all_values():
-            users_sheet.append_row(["user_id", "username", "fio", "city", "register_date", "last_activity"])
+        # Открываем таблицу
+        spreadsheet = client.open_by_url(sheet_url)
+        logger.info(f"✅ Таблица открыта: {spreadsheet.title}")
         
-        if not tests_sheet.get_all_values():
-            tests_sheet.append_row(["user_id", "fio", "test_name", "score", "max_score", "pass_date", "answers"])
-            
-        return users_sheet, tests_sheet
+        # Получаем или создаем листы
+        users_sheet = get_or_create_worksheet(spreadsheet, "Пользователи", 
+                                            ["user_id", "username", "fio", "city", "register_date", "last_activity"])
+        
+        tests_sheet = get_or_create_worksheet(spreadsheet, "Тесты",
+                                            ["user_id", "fio", "test_name", "score", "max_score", "pass_date", "answers"])
+        
+        if users_sheet and tests_sheet:
+            logger.info("✅ Все листы готовы к работе!")
+            return users_sheet, tests_sheet
+        else:
+            logger.error("❌ Не удалось инициализировать листы")
+            return None, None
         
     except Exception as e:
-        logger.error(f"❌ Ошибка инициализации Google Таблиц: {e}")
+        logger.error(f"❌ Критическая ошибка инициализации Google Таблиц: {e}")
         return None, None
+
+def get_or_create_worksheet(spreadsheet, sheet_name, headers):
+    """Получает или создает лист с заголовками"""
+    try:
+        try:
+            worksheet = spreadsheet.worksheet(sheet_name)
+            logger.info(f"✅ Лист '{sheet_name}' найден")
+            
+            # Проверяем есть ли заголовки
+            existing_headers = worksheet.row_values(1)
+            if not existing_headers:
+                worksheet.append_row(headers)
+                logger.info(f"✅ Добавлены заголовки в лист '{sheet_name}'")
+                
+        except gspread.WorksheetNotFound:
+            logger.info(f"📄 Создаем лист '{sheet_name}'")
+            worksheet = spreadsheet.add_worksheet(title=sheet_name, rows="1000", cols=str(len(headers)))
+            worksheet.append_row(headers)
+            logger.info(f"✅ Лист '{sheet_name}' создан с заголовками")
+        
+        return worksheet
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка работы с листом '{sheet_name}': {e}")
+        return None
 
 # Инициализируем Google Таблицы
 USERS_SHEET, TESTS_SHEET = init_google_sheets()
@@ -92,7 +130,7 @@ USERS_SHEET, TESTS_SHEET = init_google_sheets()
 # ==============================
 # 🧠 USER STATE & TESTS
 # ==============================
-USER_STATE = {}  # {user_id: {"state": "awaiting_fio", "fio": "", "city": "", ...}}
+USER_STATE = {}
 TESTS = {
     "test_order": {
         "title": "Тест: Приём заказа",
@@ -105,7 +143,7 @@ TESTS = {
                     "Уточнить адрес доставки",
                     "Открыть CRM-систему"
                 ],
-                "correct": 0  # индекс правильного ответа
+                "correct": 0
             },
             {
                 "question": "Как правильно подтвердить заказ клиенту?",
@@ -143,7 +181,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
 
-    # Проверяем, зарегистрирован ли пользователь
     if is_user_registered(user_id):
         await show_main_menu(update, context)
     else:
@@ -197,15 +234,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         USER_STATE[user_id]["username"] = user.username or "unknown"
         
         # Сохраняем пользователя в Google Таблицу
-        save_user_to_sheet(user_id, USER_STATE[user_id])
-        
-        await update.message.reply_text(
-            f"✅ Регистрация завершена!\n\n"
-            f"ФИО: {USER_STATE[user_id]['fio']}\n"
-            f"Город ПВЗ: {text}\n\n"
-            f"Теперь вы можете приступить к обучению!"
-        )
-        await show_main_menu(update, context)
+        if save_user_to_sheet(user_id, USER_STATE[user_id]):
+            await update.message.reply_text(
+                f"✅ Регистрация завершена!\n\n"
+                f"ФИО: {USER_STATE[user_id]['fio']}\n"
+                f"Город ПВЗ: {text}\n\n"
+                f"Теперь вы можете приступить к обучению!"
+            )
+            await show_main_menu(update, context)
+        else:
+            await update.message.reply_text(
+                "❌ Ошибка сохранения данных. "
+                "Регистрация завершена локально, но данные не сохранены в таблицу. "
+                "Обратитесь к администратору."
+            )
+            await show_main_menu(update, context)
 
 # ==============================
 # 🖱️ CALLBACK HANDLER (Buttons)
@@ -241,10 +284,10 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "3️⃣ Согласуйте способ доставки и сроки.\n"
             "4️⃣ Создайте заказ в CRM-системе.\n"
             "5️⃣ Отправьте клиенту подтверждение (SMS/email).\n\n"
-            "*Видео-инструкция:* https://youtu.be/dQw4w9WgXcQ"
+            "*Видео-инструкция:* https://youtu.be/example"
         )
         keyboard = [
-            [InlineKeyboardButton("✅ Пройти тест", URL=https://docs.google.com/forms/d/e/1FAIpQLSeMGexbgCqXZQ8yo_T24htXnEWj-gvysVPLcvDjirTgp3_Aaw/viewform?usp=dialog)],
+            [InlineKeyboardButton("✅ Пройти тест", callback_data='start_test_order')],
             [InlineKeyboardButton("🔙 Назад к материалам", callback_data='menu_training')],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -260,10 +303,10 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "3️⃣ Передайте посылку службе доставки.\n"
             "4️⃣ Отсканируйте трек-номер и внесите в систему.\n"
             "5️⃣ Уведомите клиента о передаче заказа.\n\n"
-            "*Видео-инструкция:* https://youtu.be/dQw4w9WgXcQ"
+            "*Видео-инструкция:* https://youtu.be/example"
         )
         keyboard = [
-            [InlineKeyboardButton("✅ Пройти тест", URL=https://docs.google.com/forms/d/e/1FAIpQLSeMGexbgCqXZQ8yo_T24htXnEWj-gvysVPLcvDjirTgp3_Aaw/viewform?usp=dialog')],
+            [InlineKeyboardButton("✅ Пройти тест", callback_data='start_test_shipping')],
             [InlineKeyboardButton("🔙 Назад к материалам", callback_data='menu_training')],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -283,25 +326,25 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 📝 Ответ на вопрос теста
     elif query.data.startswith('answer_'):
-        _, test_key, q_index, is_correct = query.data.split('_')
-        q_index = int(q_index)
-        is_correct = is_correct == '1'
-        
-        user_test = USER_STATE[user_id]['test']
-        user_test['answers'].append(is_correct)
-        
-        if is_correct:
-            user_test['score'] += 1
-            await query.edit_message_text("✅ Правильно!", reply_markup=None)
-        else:
-            await query.edit_message_text("❌ Неправильно!", reply_markup=None)
-        
-        # Следующий вопрос или результат
-        user_test['current_question'] += 1
-        if user_test['current_question'] < len(TESTS[test_key]['questions']):
-            await send_test_question(update, context, user_id)
-        else:
-            await show_test_result(update, context, user_id)
+        parts = query.data.split('_')
+        if len(parts) >= 4:
+            test_key = parts[1]
+            q_index = int(parts[2])
+            is_correct = parts[3] == '1'
+            
+            if user_id in USER_STATE and 'test' in USER_STATE[user_id]:
+                user_test = USER_STATE[user_id]['test']
+                user_test['answers'].append(is_correct)
+                
+                if is_correct:
+                    user_test['score'] += 1
+                
+                # Следующий вопрос или результат
+                user_test['current_question'] += 1
+                if user_test['current_question'] < len(TESTS[test_key]['questions']):
+                    await send_test_question(update, context, user_id)
+                else:
+                    await show_test_result(update, context, user_id)
 
     # ℹ️ О боте
     elif query.data == 'about':
@@ -316,6 +359,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==============================
 async def send_test_question(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
     """Отправляет текущий вопрос теста"""
+    if user_id not in USER_STATE or 'test' not in USER_STATE[user_id]:
+        return
+    
     user_test = USER_STATE[user_id]['test']
     test_key = user_test['key']
     q_index = user_test['current_question']
@@ -334,27 +380,29 @@ async def send_test_question(update: Update, context: ContextTypes.DEFAULT_TYPE,
     reply_markup = InlineKeyboardMarkup(keyboard)
     text = f"📝 *Вопрос {q_index + 1} из {len(TESTS[test_key]['questions'])}:*\n\n{question_data['question']}"
     
-    if update.callback_query:
-        await update.callback_query.message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
-    else:
-        await context.bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown", reply_markup=reply_markup)
+    # Отправляем новый вопрос как новое сообщение
+    await context.bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown", reply_markup=reply_markup)
 
 async def show_test_result(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
     """Показывает результат теста"""
+    if user_id not in USER_STATE or 'test' not in USER_STATE[user_id]:
+        return
+    
     user_test = USER_STATE[user_id]['test']
     test_key = user_test['key']
     total_questions = len(TESTS[test_key]['questions'])
     score = user_test['score']
     
     # Сохраняем результат в Google Таблицу
-    save_test_result_to_sheet(
-        user_id=user_id,
-        fio=USER_STATE[user_id]['fio'],
-        test_name=TESTS[test_key]['title'],
-        score=score,
-        max_score=total_questions,
-        answers=user_test['answers']
-    )
+    if 'fio' in USER_STATE[user_id]:
+        save_test_result_to_sheet(
+            user_id=user_id,
+            fio=USER_STATE[user_id]['fio'],
+            test_name=TESTS[test_key]['title'],
+            score=score,
+            max_score=total_questions,
+            answers=user_test['answers']
+        )
     
     text = (
         f"🎉 *Тест завершён!*\n\n"
@@ -375,10 +423,7 @@ async def show_test_result(update: Update, context: ContextTypes.DEFAULT_TYPE, u
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    if update.callback_query:
-        await update.callback_query.message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
-    else:
-        await context.bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown", reply_markup=reply_markup)
+    await context.bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown", reply_markup=reply_markup)
 
 # ==============================
 # 🖥️ MAIN MENU & UTILS
@@ -404,20 +449,23 @@ def is_user_registered(user_id: int) -> bool:
         try:
             cell = USERS_SHEET.find(str(user_id))
             return cell is not None
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"❌ Ошибка поиска пользователя в таблице: {e}")
+    
     # Fallback на временное хранилище
     return user_id in USER_STATE and "city" in USER_STATE[user_id]
 
-def save_user_to_sheet(user_id: int, user_data: dict):
+def save_user_to_sheet(user_id: int, user_data: dict) -> bool:
     """Сохраняет пользователя в Google Таблицу"""
     if not USERS_SHEET:
-        logger.warning("⚠️ USERS_SHEET не инициализирован — пользователь не сохранён")
-        return
+        logger.error("❌ USERS_SHEET не инициализирован")
+        return False
     
     try:
-        from datetime import datetime
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Логируем что пытаемся сохранить
+        logger.info(f"📝 Сохраняем пользователя {user_id}: {user_data.get('fio', '')}")
         
         USERS_SHEET.append_row([
             str(user_id),
@@ -427,17 +475,19 @@ def save_user_to_sheet(user_id: int, user_data: dict):
             now,
             now
         ])
-        logger.info(f"✅ Пользователь {user_id} сохранён в Google Таблицу")
+        logger.info(f"✅ Пользователь {user_id} успешно сохранён в Google Таблицу")
+        return True
     except Exception as e:
-        logger.error(f"❌ Ошибка сохранения пользователя: {e}")
+        logger.error(f"❌ Ошибка сохранения пользователя {user_id}: {e}")
+        return False
 
-def save_test_result_to_sheet(user_id: int, fio: str, test_name: str, score: int, max_score: int, answers: list):
+def save_test_result_to_sheet(user_id: int, fio: str, test_name: str, score: int, max_score: int, answers: list) -> bool:
     """Сохраняет результат теста в Google Таблицу"""
     if not TESTS_SHEET:
-        return
+        logger.error("❌ TESTS_SHEET не инициализирован")
+        return False
     
     try:
-        from datetime import datetime
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         TESTS_SHEET.append_row([
@@ -450,14 +500,23 @@ def save_test_result_to_sheet(user_id: int, fio: str, test_name: str, score: int
             str(answers)
         ])
         logger.info(f"✅ Результат теста для {user_id} сохранён")
+        return True
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения результата теста: {e}")
+        return False
 
 # ==============================
 # 🚀 MAIN FUNCTION
 # ==============================
 def main():
     logger.info("🚀 Запуск Бота обучения партнёров ПВЗ...")
+    
+    # Проверяем инициализацию Google Sheets
+    if USERS_SHEET and TESTS_SHEET:
+        logger.info("✅ Google Таблицы готовы к работе")
+    else:
+        logger.warning("⚠️ Google Таблицы не инициализированы - данные будут сохраняться только локально")
+    
     application = Application.builder().token(TOKEN).build()
 
     # Обработчики
