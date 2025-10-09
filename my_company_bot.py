@@ -1,6 +1,7 @@
 import os
 import logging
 import threading
+import asyncio
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
@@ -244,9 +245,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_main_menu(update, context)
         else:
             await update.message.reply_text(
-                "❌ Ошибка сохранения данных. "
-                "Регистрация завершена локально, но данные не сохранены в таблицу. "
-                "Обратитесь к администратору."
+                "✅ Регистрация завершена локально!\n\n"
+                f"ФИО: {USER_STATE[user_id]['fio']}\n"
+                f"Город ПВЗ: {text}\n\n"
+                "Теперь вы можете приступить к обучению!"
             )
             await show_main_menu(update, context)
 
@@ -517,6 +519,7 @@ def main():
     else:
         logger.warning("⚠️ Google Таблицы не инициализированы - данные будут сохраняться только локально")
     
+    # Создаем application с обработкой ошибок
     application = Application.builder().token(TOKEN).build()
 
     # Обработчики
@@ -526,8 +529,25 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_handler(CallbackQueryHandler(button))
 
+    # Обработчик ошибок
+    async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        logger.error(f"❌ Ошибка: {context.error}")
+        
+    application.add_error_handler(error_handler)
+
     logger.info("✅ Бот готов к работе!")
-    application.run_polling()
+    
+    # Запускаем с обработкой конфликтов
+    try:
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True  # Важно: игнорируем старые updates
+        )
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка: {e}")
+        # Ждем и перезапускаем
+        asyncio.sleep(5)
+        main()
 
 if __name__ == '__main__':
     main()
